@@ -14,7 +14,10 @@ from PyQt5.QtWidgets import (
 from processor import DroneVideoProcessor
 
 class VideoWorker(QObject):
-    frameReady = pyqtSignal(object)  # emits processed frame (BGR)
+    """
+    Runs in a separate thread to fetch frames and process them.
+    """
+    frameReady = pyqtSignal(object)  # Emitted with the processed frame (BGR) 
     finished = pyqtSignal()
 
     def __init__(self, processor: DroneVideoProcessor):
@@ -23,7 +26,7 @@ class VideoWorker(QObject):
         self.running = True
 
     def run(self):
-        """ Continuously fetch frames, process, emit signals. """
+        """ Main loop: read frames, process, emit. Stop if end or not running. """
         try:
             while self.running:
                 frame = self.processor.get_next_frame()
@@ -39,19 +42,20 @@ class VideoWorker(QObject):
     def stop(self):
         self.running = False
 
+
 class VideoPlayer(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Drone Detection: Auto Ratio + Fallback + K-Means + Stabilization")
+        self.setWindowTitle("Drone Detection + Stabilization + K-Means + BG Subtraction")
 
-        self.video_path = os.path.join("input", "1.mp4")
+        # Hard-coded path or override with --video
+        self.video_path = os.path.join("input", "5.mp4")
 
         # Initialize the processor
         self.processor = DroneVideoProcessor(
             video_path=self.video_path,
-            mode='floodfill',      # could also use 'mog2' or 'knn'
+            mode='floodfill',         # can be 'floodfill', 'mog2', or 'knn'
             ratio=0.8,
-            use_auto_ratio=False,  # off by default
             max_objects=3,
             morph_kernel=3,
             morph_iterations=2,
@@ -75,20 +79,21 @@ class VideoPlayer(QMainWindow):
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
 
-        # Video display
+        # 1) Video display label
         self.video_label = QLabel("Video")
         self.video_label.setStyleSheet("background-color: black;")
         self.video_label.setAlignment(Qt.AlignCenter)
+        # Let it resize with the window
         main_layout.addWidget(self.video_label)
 
-        # Timeline
+        # 2) Timeline slider
         self.timeline_slider = QSlider(Qt.Horizontal)
         self.timeline_slider.setRange(0, self.processor.total_frames - 1)
         self.timeline_slider.setValue(0)
         self.timeline_slider.sliderReleased.connect(self.on_timeline_slider_released)
         main_layout.addWidget(self.timeline_slider)
 
-        # Controls
+        # 3) Controls
         controls_layout = QHBoxLayout()
 
         # Mode combo
@@ -98,35 +103,37 @@ class VideoPlayer(QMainWindow):
         self.mode_combo.currentTextChanged.connect(self.on_mode_changed)
         controls_layout.addWidget(self.mode_combo)
 
-        # Use Auto Ratio
-        self.auto_ratio_check = QCheckBox("Use Auto Ratio")
-        self.auto_ratio_check.setChecked(self.processor.use_auto_ratio)
-        self.auto_ratio_check.stateChanged.connect(self.on_auto_ratio_toggled)
-        controls_layout.addWidget(self.auto_ratio_check)
-
-        # Manual ratio slider
-        controls_layout.addWidget(QLabel("Manual Ratio:"))
+        # Ratio slider
+        controls_layout.addWidget(QLabel("Ratio:"))
         self.ratio_slider = QSlider(Qt.Horizontal)
         self.ratio_slider.setRange(0, 100)
         self.ratio_slider.setValue(int(self.processor.detector.ratio * 100))
         self.ratio_slider.valueChanged.connect(self.on_ratio_changed)
         controls_layout.addWidget(self.ratio_slider)
 
-        # A read-only slider to show the dynamic ratio
-        controls_layout.addWidget(QLabel("Dynamic Ratio:"))
-        self.auto_ratio_slider = QSlider(Qt.Horizontal)
-        self.auto_ratio_slider.setRange(0, 100)
-        self.auto_ratio_slider.setValue(int(self.processor.get_auto_ratio_value() * 100))
-        self.auto_ratio_slider.setEnabled(False)
-        controls_layout.addWidget(self.auto_ratio_slider)
-
-        # MaxObj
+        # Max objects
         controls_layout.addWidget(QLabel("MaxObj:"))
         self.maxobj_spin = QSpinBox()
         self.maxobj_spin.setRange(1, 20)
         self.maxobj_spin.setValue(self.processor.max_objects)
         self.maxobj_spin.valueChanged.connect(self.on_max_objects_changed)
         controls_layout.addWidget(self.maxobj_spin)
+
+        # Kernel spin
+        controls_layout.addWidget(QLabel("Kernel:"))
+        self.kernel_spin = QSpinBox()
+        self.kernel_spin.setRange(1, 21)
+        self.kernel_spin.setValue(self.processor.detector.morph_kernel)
+        self.kernel_spin.valueChanged.connect(self.on_kernel_changed)
+        controls_layout.addWidget(self.kernel_spin)
+
+        # Iter spin
+        controls_layout.addWidget(QLabel("Iter:"))
+        self.iter_spin = QSpinBox()
+        self.iter_spin.setRange(1, 10)
+        self.iter_spin.setValue(self.processor.detector.morph_iterations)
+        self.iter_spin.valueChanged.connect(self.on_iter_changed)
+        controls_layout.addWidget(self.iter_spin)
 
         # Alpha spin
         controls_layout.addWidget(QLabel("Alpha:"))
@@ -138,7 +145,8 @@ class VideoPlayer(QMainWindow):
         controls_layout.addWidget(self.alpha_spin)
 
         # Alpha slider
-        controls_layout.addWidget(QLabel("AlphaSlider:"))
+        alpha_slider_label = QLabel("Alpha Slider:")
+        controls_layout.addWidget(alpha_slider_label)
         self.alpha_slider = QSlider(Qt.Horizontal)
         self.alpha_slider.setRange(0, 100)
         self.alpha_slider.setValue(int(self.processor.alpha * 100))
@@ -146,7 +154,7 @@ class VideoPlayer(QMainWindow):
         controls_layout.addWidget(self.alpha_slider)
 
         # Use history
-        self.history_check = QCheckBox("UseHistory")
+        self.history_check = QCheckBox("Use History")
         self.history_check.setChecked(self.processor.use_history)
         self.history_check.stateChanged.connect(self.on_history_changed)
         controls_layout.addWidget(self.history_check)
@@ -160,7 +168,7 @@ class VideoPlayer(QMainWindow):
         controls_layout.addWidget(self.maxarea_spin)
 
         # Stabilization
-        self.stab_check = QCheckBox("Stabilize")
+        self.stab_check = QCheckBox("Stabilization")
         self.stab_check.setChecked(self.processor.use_stabilization)
         self.stab_check.stateChanged.connect(self.on_stab_changed)
         controls_layout.addWidget(self.stab_check)
@@ -183,7 +191,7 @@ class VideoPlayer(QMainWindow):
         controls_layout.addWidget(self.ransac_spin)
 
         # K-Means
-        self.kmeans_check = QCheckBox("UseKMeans")
+        self.kmeans_check = QCheckBox("Use K-Means")
         self.kmeans_check.setChecked(self.processor.use_kmeans)
         self.kmeans_check.stateChanged.connect(self.on_kmeans_changed)
         controls_layout.addWidget(self.kmeans_check)
@@ -198,7 +206,7 @@ class VideoPlayer(QMainWindow):
 
         main_layout.addLayout(controls_layout)
 
-        # Playback buttons
+        # 4) Playback buttons
         buttons_layout = QHBoxLayout()
         self.play_button = QPushButton("Play")
         self.play_button.clicked.connect(self.play_video)
@@ -214,11 +222,13 @@ class VideoPlayer(QMainWindow):
 
         main_layout.addLayout(buttons_layout)
 
+        # Let's allow resizing
         self.resize(1200, 700)
 
-    # Worker controls
+    # Worker thread controls
     def play_video(self):
         if self.worker_thread is not None:
+            # Already running
             return
         self.worker_thread = QThread()
         self.worker = VideoWorker(self.processor)
@@ -262,17 +272,12 @@ class VideoPlayer(QMainWindow):
     def update_video_label(self, frame_bgr):
         if frame_bgr is None:
             return
-
-        # If auto ratio is ON & mode == floodfill, update dynamic ratio slider
-        if self.processor.use_auto_ratio and self.processor.detector.mode == 'floodfill':
-            auto_val = int(self.processor.get_auto_ratio_value() * 100)
-            self.auto_ratio_slider.setValue(auto_val)
-
         frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
         h, w, ch = frame_rgb.shape
         bytes_per_line = ch * w
         qimage = QImage(frame_rgb.data, w, h, bytes_per_line, QImage.Format_RGB888)
         pixmap = QPixmap.fromImage(qimage)
+        # Scale to label size
         pixmap = pixmap.scaled(
             self.video_label.width(),
             self.video_label.height(),
@@ -291,18 +296,18 @@ class VideoPlayer(QMainWindow):
     def on_mode_changed(self, text):
         self.processor.set_mode(text)
 
-    def on_auto_ratio_toggled(self, state):
-        flag = (state == Qt.Checked)
-        self.processor.set_use_auto_ratio(flag)
-        # If auto ratio is on, disable the manual ratio slider
-        self.ratio_slider.setEnabled(not flag)
-
     def on_ratio_changed(self, val):
         ratio = val / 100.0
         self.processor.set_ratio(ratio)
 
     def on_max_objects_changed(self, val):
         self.processor.set_max_objects(val)
+
+    def on_kernel_changed(self, val):
+        self.processor.set_morph_kernel(val)
+
+    def on_iter_changed(self, val):
+        self.processor.set_morph_iterations(val)
 
     def on_alpha_changed(self, val):
         self.alpha_slider.setValue(int(val * 100))
@@ -337,6 +342,7 @@ class VideoPlayer(QMainWindow):
     def on_kmeans_clusters_changed(self, val):
         self.processor.set_kmeans_clusters(val)
 
+
 def main():
     import argparse
     from PyQt5.QtWidgets import QApplication
@@ -356,6 +362,7 @@ def main():
 
     player.show()
     sys.exit(app.exec_())
+
 
 if __name__ == "__main__":
     main()

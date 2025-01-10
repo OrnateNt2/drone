@@ -12,11 +12,10 @@ class DroneVideoProcessor:
     Combines:
     - Video capture
     - Optional advanced stabilization
-    - Multi-mode detection
+    - Multi-mode detection (floodfill, mog2, knn)
     - Rolling mask history
     - K-Means grouping
     - Strict bounding box limit
-    - Dynamic Auto Ratio with fallback scanning
     """
 
     def __init__(
@@ -24,7 +23,6 @@ class DroneVideoProcessor:
         video_path,
         mode='floodfill',
         ratio=0.8,
-        use_auto_ratio=False,
         max_objects=3,
         morph_kernel=3,
         morph_iterations=2,
@@ -47,11 +45,6 @@ class DroneVideoProcessor:
         self.width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         self.height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-        self.use_auto_ratio = use_auto_ratio
-        # We'll keep a separate dynamic_ratio that starts from 0
-        self.dynamic_ratio = 0.0  
-        self.missed_frames = 0  # how many consecutive frames found 0 objects
-
         self.max_objects = max_objects
         self.alpha = alpha
         self.use_history = use_history
@@ -59,6 +52,7 @@ class DroneVideoProcessor:
         self.use_kmeans = use_kmeans
         self.kmeans_clusters = kmeans_clusters
 
+        # Rolling mask history
         self.history_length = 5
         self.masks_history = deque(maxlen=self.history_length)
 
@@ -80,12 +74,6 @@ class DroneVideoProcessor:
 
     def set_ratio(self, val):
         self.detector.ratio = val
-
-    def set_use_auto_ratio(self, flag):
-        self.use_auto_ratio = flag
-
-    def get_auto_ratio_value(self):
-        return self.dynamic_ratio
 
     def set_max_objects(self, val):
         self.max_objects = val
@@ -133,7 +121,6 @@ class DroneVideoProcessor:
             self.current_frame_idx = frame_idx
             self.masks_history.clear()
             self.stabilizer.reset()
-            self.missed_frames = 0
             return frame
         return None
 
@@ -150,80 +137,21 @@ class DroneVideoProcessor:
 
         return frame
 
-    # --- Fallback scanning if we keep missing
-    def _fallback_rescan(self, frame, start_ratio=0.0):
-        """
-        If we've missed objects for multiple consecutive frames,
-        do a quick partial scan from 'start_ratio' up to 1.0 
-        in bigger steps (e.g., 0.05) to find a ratio 
-        yielding 1-2 bounding boxes. If found, return that ratio; else None.
-        """
-        step = 0.05
-        r = start_ratio
-        while r <= 1.0:
-            tmp_mask = self.detector.detect_objects(frame, ratio=r)
-            cnts, _ = cv2.findContours(tmp_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            valid_count = 0
-            for c in cnts:
-                x, y, w, h = cv2.boundingRect(c)
-                if w*h <= self.max_area:
-                    valid_count += 1
-
-            if 1 <= valid_count <= 2:
-                # Found a decent ratio
-                return r
-
-            r += step
-
-        return None
-
-    # --- Main pipeline
+    # --- Core processing
     def process_frame(self, frame):
+        """
+        1) Build a mask using the detector.
+        2) Optionally merge with rolling mask history.
+        3) Extract bounding boxes, do K-Means grouping, limit to self.max_objects.
+        4) Fill + bounding box on the original frame, return final BGR.
+        """
         if frame is None:
             return None
 
-        if self.use_auto_ratio and self.detector.mode == 'floodfill':
-            # Step 1) Detect with dynamic_ratio
-            mask = self.detector.detect_objects(frame, ratio=self.dynamic_ratio)
+        # 1) Detector
+        mask = self.detector.detect_objects(frame)
 
-            # Step 2) Count bounding boxes
-            cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            valid_count = 0
-            for c in cnts:
-                x, y, w, h = cv2.boundingRect(c)
-                if w*h <= self.max_area:
-                    valid_count += 1
-
-            # Step 3) Incremental logic (aim for 1-2 objects)
-            step = 0.02
-            if valid_count == 0:
-                # No objects => ratio too small
-                self.missed_frames += 1
-                self.dynamic_ratio += step
-            elif valid_count >= 3:
-                # Too many => ratio too big
-                self.missed_frames = 0
-                self.dynamic_ratio -= step
-            else:
-                # 1 or 2 => good, do nothing
-                self.missed_frames = 0
-
-            # Step 4) clamp ratio
-            self.dynamic_ratio = max(0.0, min(1.0, self.dynamic_ratio))
-
-            # Step 5) fallback if we keep missing
-            MISS_THRESHOLD = 3
-            if self.missed_frames >= MISS_THRESHOLD:
-                found_ratio = self._fallback_rescan(frame, start_ratio=self.dynamic_ratio)
-                if found_ratio is not None:
-                    self.dynamic_ratio = found_ratio
-                self.missed_frames = 0
-
-        else:
-            # Normal detection (manual ratio or mog2/knn)
-            mask = self.detector.detect_objects(frame)
-
-        # Rolling history
+        # 2) Rolling history
         if self.use_history:
             self.masks_history.append(mask)
             hist_mask = np.zeros_like(mask, dtype=np.uint8)
@@ -233,7 +161,7 @@ class DroneVideoProcessor:
         else:
             final_mask = mask
 
-        # Find bounding boxes
+        # 3) Find contours, skip area > max_area
         contours, _ = cv2.findContours(final_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         boxes = []
         for c in contours:
@@ -242,21 +170,24 @@ class DroneVideoProcessor:
             if area <= self.max_area:
                 boxes.append((x, y, w, h))
 
-        # K-Means grouping
+        # Optional K-Means grouping
         if self.use_kmeans and len(boxes) > 0:
-            centers = np.array([[bx + bw/2, by + bh/2] for (bx, by, bw, bh) in boxes], dtype=np.float32)
+            # cluster bounding box centers
+            centers = np.array(
+                [[x + w/2, y + h/2] for (x, y, w, h) in boxes], dtype=np.float32
+            )
             n_clusters = min(self.kmeans_clusters, len(centers))
             kmeans = KMeans(n_clusters=n_clusters, random_state=42)
             labels = kmeans.fit_predict(centers)
 
-            grouped_dict = {}
+            grouped_boxes = {}
             for i, label in enumerate(labels):
-                if label not in grouped_dict:
-                    grouped_dict[label] = []
-                grouped_dict[label].append(boxes[i])
+                if label not in grouped_boxes:
+                    grouped_boxes[label] = []
+                grouped_boxes[label].append(boxes[i])
 
             new_boxes = []
-            for label, group in grouped_dict.items():
+            for label, group in grouped_boxes.items():
                 minx = min(b[0] for b in group)
                 miny = min(b[1] for b in group)
                 maxx = max((b[0] + b[2]) for b in group)
@@ -265,19 +196,21 @@ class DroneVideoProcessor:
 
             boxes = new_boxes
 
-        # Sort by area desc, keep up to max_objects
-        boxes.sort(key=lambda b: b[2]*b[3], reverse=True)
+        # Sort by area descending, keep up to max_objects
+        boxes = sorted(boxes, key=lambda b: b[2]*b[3], reverse=True)
         boxes = boxes[:self.max_objects]
 
-        # Draw
+        # 4) Fill + bounding box
         output_frame = frame.copy()
         overlay = output_frame.copy()
 
         for (x, y, w, h) in boxes:
             cv2.rectangle(overlay, (x, y), (x + w, y + h), (0, 255, 0), cv2.FILLED)
 
+        # alpha-blend
         output_frame = cv2.addWeighted(overlay, self.alpha, output_frame, 1 - self.alpha, 0)
 
+        # draw bounding boxes in opaque
         for (x, y, w, h) in boxes:
             cv2.rectangle(output_frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
 

@@ -11,9 +11,9 @@ class Stabilizer:
 
     def __init__(self, smoothing_radius=5, ransac_thresh=3.0, max_corners=300):
         """
-        :param smoothing_radius: how many transforms to store & average for smoother motion
+        :param smoothing_radius: Number of transforms to store & average for smoother motion
         :param ransac_thresh: RANSAC reprojection threshold
-        :param max_corners: max corners to track (for optical flow)
+        :param max_corners: max corners to track
         """
         self.smoothing_radius = smoothing_radius
         self.ransac_thresh = ransac_thresh
@@ -24,19 +24,18 @@ class Stabilizer:
         self.prev_gray = None
 
     def reset(self):
-        """Clears buffers and resets the previous frame."""
+        """Clears buffers and resets previous frame."""
         self.prev_gray = None
         self.transform_buffer.clear()
 
     def stabilize(self, frame_bgr):
         """
-        Steps:
-          1) Convert current frame to gray.
-          2) If no prev_gray, store it & return frame as-is.
-          3) Otherwise, find good features, track with optical flow, 
-             estimate partial-affine transform with RANSAC, store transform.
-          4) Compute a smoothed transform over the last 'smoothing_radius'.
-          5) Warp the frame by that transform.
+        1) Convert current frame to gray.
+        2) If no prev_gray, store it and return frame as-is.
+        3) Otherwise, find good features, track them with optical flow, 
+           estimate partial-affine transform with RANSAC, store transform in a buffer.
+        4) Compute a smoothed transform from the buffer.
+        5) Warp the current frame by the smoothed transform.
         """
         gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
         if self.prev_gray is None:

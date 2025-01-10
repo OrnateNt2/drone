@@ -42,29 +42,29 @@ class Detector:
         self.mode = new_mode
         self._init_bg_subtractor()
 
-    def detect_objects(self, frame_bgr, ratio=None):
+    def detect_objects(self, frame_bgr):
         """
-        Return a binary mask of detected regions.
-        If ratio is provided, it overrides self.ratio for flood-fill mode.
+        Return a binary mask of detected regions, 
+        depending on the chosen mode.
         """
-        if ratio is None:
-            ratio = self.ratio
-
         if self.mode in ('mog2', 'knn'):
+            # background subtraction
+            # make sure bg_subtractor is not None
             if self.bg_subtractor is None:
                 self._init_bg_subtractor()
+
             fg_mask = self.bg_subtractor.apply(frame_bgr)
             kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (self.morph_kernel, self.morph_kernel))
             cleaned = cv2.morphologyEx(fg_mask, cv2.MORPH_CLOSE, kernel, iterations=self.morph_iterations)
             return cleaned
         else:
             # fallback to flood-fill mode
-            return self._floodfill_mode(frame_bgr, ratio)
+            return self._floodfill_mode(frame_bgr)
 
-    def _floodfill_mode(self, frame_bgr, ratio_val):
+    def _floodfill_mode(self, frame_bgr):
         """
-        Implementation of repeated flood-fill for bright spots,
-        using ratio_val * maxVal as threshold.
+        Implementation of repeated flood-fill for bright spots
+        using self.ratio * maxVal as threshold.
         """
         gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
         combined_mask = np.zeros_like(gray, dtype=np.uint8)
@@ -76,7 +76,7 @@ class Detector:
             if maxVal <= 0:
                 break
 
-            threshold_val = ratio_val * maxVal
+            threshold_val = self.ratio * maxVal
             mask = (working_gray >= threshold_val).astype(np.uint8) * 255
 
             kernel = cv2.getStructuringElement(
